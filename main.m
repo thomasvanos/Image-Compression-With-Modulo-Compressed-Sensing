@@ -1,0 +1,219 @@
+%% Load MNIST 
+clc; clear; close all;
+
+addpath(genpath(pwd));
+
+%% Load the MNIST dataset
+% train = readtable("mnist_train.csv");
+test = readtable("mnist_test.csv");
+
+% train_matrix = table2array(train);
+test_matrix = table2array(test);
+
+% train_labels = train_matrix(:, 1); % The first column is the label
+% train_images = train_matrix(:, 2:end);
+
+
+test_labels = test_matrix(:, 1); % The first column is the label
+test_images = test_matrix(:, 2:end); % Only the pixel values
+
+% Normalize the images to l1 norm
+test_images = double(test_images);
+image_vec = test_images(16, :).'; 
+image = reshape(image_vec, [28, 28]);
+% Show original image
+% imshow(imcomplement(image), [-254, 0])
+
+norm_image_vec = norm(image_vec, 1);
+image_vec = image_vec/norm_image_vec; %input to the algorithm 
+
+
+%%
+%Measurement size iteration settings
+set.mspan = 100:50:700; 
+set.R = 1; %modulo period
+
+%Modulo period iterations settings
+set.M = 400;
+set.Rspan = 1.0:0.25:4.0;
+
+%Choose Method
+set.method = 'measurements'; %Choose 'measurements', 'modulo period'
+
+% Other settings
+set.spgl_opts = spgSetParms('verbosity', 0);
+set.iterations = 10;
+
+x_star =image_vec;
+
+im = imcomplement(transpose(image));
+
+switch set.method
+    
+    case 'measurements'
+        for iter = 1:10 %Do iterations to have a more general result
+            all_images = [];
+            recon_error = nan(length(set.mspan), 6);        
+            for k = 1:length(set.mspan)  %Iterations over measurement size
+                s = nnz(x_star);
+                m = set.mspan(k);
+                % Determine sparsity of image vector, s<m in order to get
+                % unique solution for cosamp.
+                if s<m
+                    s=s;
+                else
+                    s=m-1;
+                end
+
+                [y, y_mod, p_star, A] = generate_measurement_signal(x_star, m, set.R); 
+                p_init = model_initialization(y_mod, set.R);
+                
+                % Recover image using different algorithms
+                [x_JP, delta_p_JP] = justice_pursuit_model(y_mod, p_init, A, set.R, set.spgl_opts);
+                x_BP = basis_pursuit_model(y_mod, p_init, A, set.R, set.spgl_opts);
+                x_cosamp = cosamp_model(y_mod, p_init, A, set.R, s);          
+                x_BP_nomod = spg_bp(A, y, set.spgl_opts);
+                x_cosamp_nomod = CoSaMP(A, y, s);
+
+                x_hats = [x_BP, x_JP, x_cosamp, x_BP_nomod, x_cosamp_nomod];
+                x_star_rep = repmat(x_star, 1, size(x_hats, 2));
+
+                recon_error(k, :) = [set.mspan(k), vecnorm(x_star_rep-x_hats)/norm(x_star)];
+                
+                % Recover image and show correctly by taking imcomplement
+                % and transpose
+                x_im = x_hats.*norm_image_vec;
+                recon_images = im;
+                for i = 1:size(x_im, 2)
+                    j = 1;
+                    reshaped_x = imcomplement(transpose(reshape(x_im(:, i), [28 28])));
+                    recon_images = [recon_images; reshaped_x];
+                end
+
+                all_images =[all_images recon_images];
+            end
+
+            figure()
+            imshow(all_images, [-255, 0]);
+            xticks(14:28:28*length(set.mspan)-14);
+            xticklabels(num2cell(set.mspan))
+            xlabel('m')
+
+            yticks(14:28:28*6-14)
+            yticklabels({'Original', 'Basic Pursuit', 'Justice Pursuit', 'CoSaMP', 'BP no modulo', 'CoSaMP no modulo'});
+            ylabel('Method')
+            axis on;
+
+% 
+%             figure()
+%             plot(recon_error(:, 1), recon_error(:, 2:end), 'o-')
+%             title('Relative Error vs Number of Measurements')
+%             ylabel('$\frac{||x^*-x||}{||x^*||}$', 'Interpreter','latex')
+%             xlabel('Number of samples m'); grid on;
+%             legend({'Basic Pursuit', 'Justice Pursuit', 'CoSaMP', 'BP no modulo', 'CoSaMP no modulo'})
+            
+            all_errors(:, :, iter) = recon_error;
+        end
+        all_errors = mean(all_errors, 3);
+        figure()
+        plot(all_errors(:, 1), all_errors(:, 2:end), 'o-')
+        title('Relative Error vs Number of Measurements, R=1')
+        ylabel('$\frac{||x^*-x||}{||x^*||}$', 'Interpreter','latex')
+        xlabel('Number of samples m'); grid on;
+        legend({'Basic Pursuit', 'Justice Pursuit', 'CoSaMP', 'BP no modulo', 'CoSaMP no modulo'})
+
+    case 'modulo period'
+        for iter = 1:10 %Do iterations to have a more general result
+            A = randn(set.M, size(x_star, 1));
+            all_images = [];
+            recon_error = nan(length(set.Rspan), 4);
+            for k = 1:length(set.Rspan) %Iterations over modulo period
+                m = set.M;
+                R  = set.Rspan(k);
+                s = nnz(x_star);
+                if s<m
+                    s=s;
+                else
+                    s=m-1;
+                end
+
+                [y, y_mod, p_star, ~] = generate_measurement_signal_fixed_A(x_star, A, R);
+                p_init = model_initialization(y_mod, R);
+
+                % Recover using various algorithms
+                [x_JP, delta_p_JP] = justice_pursuit_model(y_mod, p_init, A, R, set.spgl_opts);
+                x_BP = basis_pursuit_model(y_mod, p_init, A, R, set.spgl_opts);
+                x_cosamp = cosamp_model(y_mod, p_init, A, R, s);
+               
+                x_hats = [x_BP, x_JP, x_cosamp];
+                x_star_rep = repmat(x_star, 1, size(x_hats, 2));
+
+                recon_error(k, :) = [R, vecnorm(x_star_rep-x_hats)/norm(x_star)];
+                
+                % Recover image and show correctly by taking imcomplement
+                % and transpose
+                x_im = x_hats.*norm_image_vec;
+                recon_images = im;
+                for i = 1:size(x_im, 2)
+                    j = 1;
+                    reshaped_x = imcomplement(transpose(reshape(x_im(:, i), [28 28])));
+                    recon_images = [recon_images; reshaped_x];
+                end
+                all_images =[all_images recon_images];
+            end
+
+%             figure()
+%             imshow(all_images, [-255, 0]);
+%             xticks(14:28:28*length(set.Rspan)-14);
+%             xticklabels(num2cell(set.Rspan));
+%             xlabel('R');
+% 
+%             yticks(14:28:28*4-14)
+%             yticklabels({'Original', 'Basic Pursuit', 'Justice Pursuit', 'CoSaMP'});
+%             ylabel('Method');
+%             axis on;
+
+%             figure()
+%             plot(recon_error(:, 1), recon_error(:, 2:end), 'o-')
+%             title('Relative Error vs Modulo Period')
+%             ylabel('$\frac{||x^*-x||}{||x^*||}$', 'Interpreter','latex')
+%             xlabel('Number of samples m'); grid on;
+%             legend({'Basic Pursuit', 'Justice Pursuit', 'CoSaMP'})
+
+            all_errors(:, :, iter) = recon_error;
+        end
+        all_errors = mean(all_errors, 3);
+        
+        figure()
+        plot(all_errors(:, 1), all_errors(:, 2:end), 'o-')
+        title('Relative Error vs Modulo Period, m=400')
+        ylabel('$\frac{||x^*-x||}{||x^*||}$', 'Interpreter','latex')
+        xlabel('R'); grid on;
+        legend({'Basic Pursuit', 'Justice Pursuit', 'CoSaMP'})
+
+%% Test cases 
+% iterations for showing convergence after 1 altmin iteration
+    case 'iterations'
+        [y, y_mod, p_star, A] = generate_measurement_signal(x_star, set.M, set.R);
+        p_init = model_initialization(y_mod, set.R);
+        p = p_init;
+        for iter = 1:set.iterations           
+            [x, delta_p] = justice_pursuit_model(y_mod, p, A, set.R, set.spgl_opts);
+            p = (-sign(A*x)+1)/2;
+            recon_error(iter, :) = [iter, norm(x_star-x)/norm(x_star)];
+            x = x*norm_image_vec;
+            im = [im imcomplement(reshape(x, [28 28]))];
+        end 
+        figure()
+        imshow(im, [-255, 0]);
+        axis image;
+
+        figure()
+        plot(recon_error(:, 1), recon_error(:, 2), 'o-')
+        title('relative error')
+        ylabel('$\frac{||x^*-x||}{||x^*||}$', 'Interpreter','latex')
+        xlabel('Number of samples m'); grid on;
+
+end 
+
+
